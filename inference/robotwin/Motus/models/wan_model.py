@@ -54,8 +54,14 @@ class WanVideoModel(nn.Module):
             "bfloat16": torch.bfloat16,
         }[precision]
         
-        # Initialize WAN model
-        self.wan_model = WanModel(**model_config)
+        # Initialize WAN model directly on the target device/precision, avoiding a ~20GB fp32 copy in host RAM
+        prev_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(self.precision)
+        try:
+            with self.device:
+                self.wan_model = WanModel(**model_config)
+        finally:
+            torch.set_default_dtype(prev_dtype)
         self.wan_model.to(device=self.device, dtype=self.precision)
 
         # Initialize VAE

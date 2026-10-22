@@ -697,7 +697,8 @@ class Motus(nn.Module):
             path = str(checkpoint_file)
     
         # Load state dict
-        checkpoint = torch.load(path, map_location='cpu')
+        # mmap keeps the 16GB checkpoint in page cache instead of host RAM
+        checkpoint = torch.load(path, map_location='cpu', mmap=True)
         state_dict = checkpoint['module']  
         missing_keys, unexpected_keys = self.load_state_dict(state_dict, strict=strict)
         logger.info(f"Checkpoint loaded from {path}: missing={len(missing_keys)}, unexpected={len(unexpected_keys)}")

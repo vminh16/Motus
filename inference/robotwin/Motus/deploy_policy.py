@@ -28,10 +28,27 @@ BAK_ROOT = str((Path(__file__).parent / "bak").resolve())
 if BAK_ROOT not in sys.path:
     sys.path.insert(0, BAK_ROOT)
 
-from wan.modules.t5 import T5EncoderModel
+from wan.modules.t5 import T5EncoderModel, umt5_xxl
+from wan.modules.tokenizers import HuggingfaceTokenizer
 from utils.image_utils import resize_with_padding
 
 logger = logging.getLogger(__name__)
+
+class MmapT5EncoderModel(T5EncoderModel):
+    """T5EncoderModel whose weights stay memory-mapped from disk, so umt5-xxl (~11GB) doesn't need to fit in host RAM."""
+
+    def __init__(self, text_len, dtype, device, checkpoint_path, tokenizer_path):
+        self.text_len = text_len
+        self.dtype = dtype
+        self.device = device
+        self.checkpoint_path = checkpoint_path
+        self.tokenizer_path = tokenizer_path
+        model = umt5_xxl(encoder_only=True, return_tokenizer=False, dtype=dtype, device='meta')
+        state_dict = torch.load(checkpoint_path, map_location='cpu', mmap=True)
+        model.load_state_dict(state_dict, assign=True)
+        self.model = model.eval().requires_grad_(False).to(device)
+        self.tokenizer = HuggingfaceTokenizer(name=tokenizer_path, seq_len=text_len, clean='whitespace')
+
 
 class MotusPolicy:
     """
@@ -59,7 +76,8 @@ class MotusPolicy:
         self.t5_cache = {}
         # Skip VAE decoding of predicted frames (only used for visualization) with MOTUS_SKIP_VIDEO_DECODE=1
         self.decode_video = os.environ.get('MOTUS_SKIP_VIDEO_DECODE', '0') != '1'
-        self.t5_encoder = T5EncoderModel(
+        t5_cls = MmapT5EncoderModel if self.t5_device == 'cpu' else T5EncoderModel
+        self.t5_encoder = t5_cls(
             text_len=512,
             dtype=torch.bfloat16,
             device=self.t5_device,
