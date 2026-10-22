@@ -34,6 +34,11 @@ from utils.image_utils import resize_with_padding
 
 logger = logging.getLogger(__name__)
 
+SCENE_PREFIX = ("The whole scene is in a realistic, industrial art style with three views: "
+                "a fixed rear camera, a movable left arm camera, and a movable right arm camera. "
+                "The aloha robot is currently performing the following task: ")
+
+
 class MmapT5EncoderModel(T5EncoderModel):
     """T5EncoderModel whose weights stay memory-mapped from disk, so umt5-xxl (~11GB) doesn't need to fit in host RAM."""
 
@@ -74,16 +79,14 @@ class MotusPolicy:
         # embeddings are cached per instruction, so it only runs once per episode.
         self.t5_device = os.environ.get('MOTUS_T5_DEVICE', 'cpu')
         self.t5_cache = {}
+        # Optional {full instruction text: embedding} file from encode_t5_cache.py; T5 is then only loaded on a cache miss
+        self.t5_cache_file = os.environ.get('MOTUS_T5_CACHE')
+        if self.t5_cache_file:
+            self.t5_cache = torch.load(self.t5_cache_file)
+            logger.info(f"Loaded {len(self.t5_cache)} cached T5 embeddings from {self.t5_cache_file}")
         # Skip VAE decoding of predicted frames (only used for visualization) with MOTUS_SKIP_VIDEO_DECODE=1
         self.decode_video = os.environ.get('MOTUS_SKIP_VIDEO_DECODE', '0') != '1'
-        t5_cls = MmapT5EncoderModel if self.t5_device == 'cpu' else T5EncoderModel
-        self.t5_encoder = t5_cls(
-            text_len=512,
-            dtype=torch.bfloat16,
-            device=self.t5_device,
-            checkpoint_path=os.path.join(self.wan_path, 'models_t5_umt5-xxl-enc-bf16.pth'),
-            tokenizer_path=os.path.join(self.wan_path, 'google', 'umt5-xxl'),
-        )
+        self.t5_encoder = None if self.t5_cache_file else self._build_t5_encoder()
 
         # Initialize VLM processor from vlm_path (for tokenization only, weights from checkpoint)
         self.vlm_processor = AutoProcessor.from_pretrained(self.vlm_path, trust_remote_code=True)
@@ -111,6 +114,16 @@ class MotusPolicy:
         self.step_count = 0
 
         logger.info("Motus Policy initialized successfully")
+
+    def _build_t5_encoder(self):
+        t5_cls = MmapT5EncoderModel if self.t5_device == 'cpu' else T5EncoderModel
+        return t5_cls(
+            text_len=512,
+            dtype=torch.bfloat16,
+            device=self.t5_device,
+            checkpoint_path=os.path.join(self.wan_path, 'models_t5_umt5-xxl-enc-bf16.pth'),
+            tokenizer_path=os.path.join(self.wan_path, 'google', 'umt5-xxl'),
+        )
 
     def set_instruction(self, instruction: str):
         """Set the current instruction for the policy."""
@@ -256,14 +269,16 @@ class MotusPolicy:
         current_frame = self.obs_cache[-1]
 
         # Encode instruction with T5
-        scene_prefix = ("The whole scene is in a realistic, industrial art style with three views: "
-                        "a fixed rear camera, a movable left arm camera, and a movable right arm camera. "
-                        "The aloha robot is currently performing the following task: ")
-        instruction = f"{scene_prefix}{self.current_instruction}"
+        instruction = f"{SCENE_PREFIX}{self.current_instruction}"
         if instruction not in self.t5_cache:
+            if self.t5_encoder is None:
+                logger.warning(f"T5 cache miss, loading T5 on {self.t5_device}: {instruction}")
+                self.t5_encoder = self._build_t5_encoder()
             with torch.no_grad():
                 t5_out = self.t5_encoder([instruction], self.t5_device)
-            self.t5_cache = {instruction: t5_out}
+            if not self.t5_cache_file:
+                self.t5_cache.clear()
+            self.t5_cache[instruction] = t5_out
         t5_out = self.t5_cache[instruction]
         if isinstance(t5_out, torch.Tensor):
             t5_list = [t5_out.squeeze(0)] if t5_out.dim() == 3 else [t5_out]
