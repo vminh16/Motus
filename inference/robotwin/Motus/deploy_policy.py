@@ -52,11 +52,17 @@ class MotusPolicy:
         # Initialize model WITHOUT loading pretrained backbones
         self.model = self._load_model()
 
-        # Initialize T5 encoder for language embeddings (WAN text encoder)
+        # Initialize T5 encoder for language embeddings (WAN text encoder).
+        # umt5-xxl takes ~11GB, so keep it on CPU by default (MOTUS_T5_DEVICE=cuda to restore old behavior);
+        # embeddings are cached per instruction, so it only runs once per episode.
+        self.t5_device = os.environ.get('MOTUS_T5_DEVICE', 'cpu')
+        self.t5_cache = {}
+        # Skip VAE decoding of predicted frames (only used for visualization) with MOTUS_SKIP_VIDEO_DECODE=1
+        self.decode_video = os.environ.get('MOTUS_SKIP_VIDEO_DECODE', '0') != '1'
         self.t5_encoder = T5EncoderModel(
             text_len=512,
             dtype=torch.bfloat16,
-            device=device,
+            device=self.t5_device,
             checkpoint_path=os.path.join(self.wan_path, 'models_t5_umt5-xxl-enc-bf16.pth'),
             tokenizer_path=os.path.join(self.wan_path, 'google', 'umt5-xxl'),
         )
@@ -236,7 +242,11 @@ class MotusPolicy:
                         "a fixed rear camera, a movable left arm camera, and a movable right arm camera. "
                         "The aloha robot is currently performing the following task: ")
         instruction = f"{scene_prefix}{self.current_instruction}"
-        t5_out = self.t5_encoder([instruction], self.device)
+        if instruction not in self.t5_cache:
+            with torch.no_grad():
+                t5_out = self.t5_encoder([instruction], self.t5_device)
+            self.t5_cache = {instruction: t5_out}
+        t5_out = self.t5_cache[instruction]
         if isinstance(t5_out, torch.Tensor):
             t5_list = [t5_out.squeeze(0)] if t5_out.dim() == 3 else [t5_out]
         elif isinstance(t5_out, list):
@@ -257,6 +267,7 @@ class MotusPolicy:
                 num_inference_steps=num_inference_steps,
                 language_embeddings=t5_list,
                 vlm_inputs=[vlm_inputs],
+                decode_video=self.decode_video,
             )
 
         # Save frame grid

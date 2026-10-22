@@ -883,8 +883,9 @@ class Motus(nn.Module):
         state: torch.Tensor = None,
         num_inference_steps: int = 50,
         language_embeddings: Optional[List[torch.Tensor]] = None,
-        vlm_inputs: Optional[List] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        vlm_inputs: Optional[List] = None,
+        decode_video: bool = True
+    ) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
         """
         Joint inference for video and action prediction.
         
@@ -895,6 +896,7 @@ class Motus(nn.Module):
             state: Initial robot state [B, state_dim]
             num_inference_steps: Number of denoising steps
             language_embeddings: Pre-encoded T5 embeddings for WAN model
+            decode_video: If False, skip VAE decoding and return None for predicted_frames (actions are unaffected)
             
         Returns:
             Tuple of (predicted_frames, predicted_actions)
@@ -921,7 +923,8 @@ class Motus(nn.Module):
 
         # 2. Understanding Expert features and T5 context
         # Extract understanding features from VLM
-        und_tokens = self.und_module.extract_und_features(vlm_inputs)
+        # VLM is frozen and its inputs don't depend on t, so compute once and reuse every step
+        und_tokens_init = self.und_module.extract_und_features(vlm_inputs)
 
         # T5 preprocess
         processed_t5_context = self.video_module.preprocess_t5_embeddings(language_embeddings)
@@ -943,8 +946,8 @@ class Motus(nn.Module):
             registers = self.action_expert.registers.expand(B, -1, -1)  # [B, num_registers, dim]
             action_tokens = self.action_expert.input_encoder(state_tokens, action_latent, registers)
 
-            # Note: Understanding tokens already extracted before the loop, will be updated in joint attention
-            und_tokens = self.und_module.extract_und_features(vlm_inputs)  # [B, num_queries * num_layers, und_dim]
+            # Reset understanding tokens to the cached VLM features (they are updated in joint attention)
+            und_tokens = und_tokens_init  # [B, num_queries * num_layers, und_dim]
 
             
             # Trimodal MoT forward - joint denoising for WAN, Action, Understanding
@@ -991,11 +994,13 @@ class Motus(nn.Module):
                 video_latent[:, :, 0:1] = condition_frame_latent
 
         # 4. Decode outputs
-        with torch.no_grad():
-            decoded_frames = self.video_model.decode_video(video_latent)
-            predicted_frames = decoded_frames[:, :, 1:]  # Skip first frame (condition)
-            predicted_frames = (predicted_frames + 1.0) / 2.0  # [-1,1] to [0,1]
-            predicted_frames = torch.clamp(predicted_frames, 0, 1).float()
+        predicted_frames = None
+        if decode_video:
+            with torch.no_grad():
+                decoded_frames = self.video_model.decode_video(video_latent)
+                predicted_frames = decoded_frames[:, :, 1:]  # Skip first frame (condition)
+                predicted_frames = (predicted_frames + 1.0) / 2.0  # [-1,1] to [0,1]
+                predicted_frames = torch.clamp(predicted_frames, 0, 1).float()
         
         predicted_actions = action_latent.float()  # [B, action_chunk_size, 14]
 
