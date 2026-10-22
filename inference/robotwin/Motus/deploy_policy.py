@@ -54,6 +54,16 @@ class MmapT5EncoderModel(T5EncoderModel):
         self.model = model.eval().requires_grad_(False).to(device)
         self.tokenizer = HuggingfaceTokenizer(name=tokenizer_path, seq_len=text_len, clean='whitespace')
 
+    def __call__(self, texts, device):
+        ids, mask = self.tokenizer(texts, return_mask=True, add_special_tokens=True)
+        seq_lens = mask.gt(0).sum(dim=1).long()
+        # Padding up to text_len is masked out, so dropping it leaves the valid-token outputs unchanged
+        # while cutting compute ~6-8x (instructions are ~60-80 of the 512 tokens)
+        max_len = int(seq_lens.max())
+        ids, mask = ids[:, :max_len].to(device), mask[:, :max_len].to(device)
+        context = self.model(ids, mask)
+        return [u[:v] for u, v in zip(context, seq_lens)]
+
 
 class MotusPolicy:
     """
