@@ -96,6 +96,10 @@ class MotusPolicy:
             logger.info(f"Loaded {len(self.t5_cache)} cached T5 embeddings from {self.t5_cache_file}")
         # Skip VAE decoding of predicted frames (only used for visualization) with MOTUS_SKIP_VIDEO_DECODE=1
         self.decode_video = os.environ.get('MOTUS_SKIP_VIDEO_DECODE', '0') != '1'
+        if not self.decode_video:
+            # The fp32 VAE decoder (~2GB) is only used to render predicted frames; keep it off the GPU
+            self.model.video_model.vae.model.decoder.to('cpu')
+            torch.cuda.empty_cache()
         self.t5_encoder = None if self.t5_cache_file else self._build_t5_encoder()
 
         # Initialize VLM processor from vlm_path (for tokenization only, weights from checkpoint)
